@@ -5,7 +5,9 @@ use bcrypt::{DEFAULT_COST, hash, verify};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-mod engine;
+use crate::types::{OrderbookCommand, User};
+
+mod orderbook;
 mod types;
 
 #[get("/hello/{name}")]
@@ -13,22 +15,10 @@ async fn greet(name: web::Path<String>) -> impl Responder {
     format!("hello {name}")
 }
 
-#[derive(Deserialize)]
-struct AuthRequest {
-    username: String,
-    password: String,
-}
-
-#[derive(Clone)]
-struct User {
-    id: String,
-    username: String,
-    password_hash: String,
-}
-
 struct AppState {
-    users: Mutex<HashMap<String, User>>,
+    users: Mutex<HashMap<String, types::User>>,
     sessions: Mutex<HashMap<String, String>>,
+    orderbook_tx: tokio::sync::mpsc::Sender<OrderbookCommand>,
 }
 
 #[derive(Serialize)]
@@ -36,6 +26,23 @@ struct AuthResponse {
     success: bool,
     message: String,
     token: Option<String>,
+}
+#[derive(Deserialize)]
+struct AuthRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct OnRampRequest {
+    amount: f64,
+}
+
+#[derive(Serialize)]
+struct OnRampResponse {
+    success: bool,
+    message: String,
+    new_balance: f64,
 }
 
 #[post("/signup")]
@@ -73,13 +80,7 @@ async fn signup(data: web::Data<AppState>, body: web::Json<AuthRequest>) -> impl
     };
 
     let id = Uuid::new_v4().to_string();
-
-    let user = User {
-        id: id.clone(),
-        username: username.clone(),
-        password_hash,
-    };
-
+    let user = User::new(id, username.clone(), password_hash);
     users.insert(username.clone(), user);
 
     HttpResponse::Ok().json(AuthResponse {
@@ -163,9 +164,16 @@ async fn whoami(data: web::Data<AppState>, req: HttpRequest) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<OrderbookCommand>(100);
+
+    tokio::spawn(async move {
+        orderbook::Orderbook::run_orderbook_engine(rx).await;
+    });
+
     let state = web::Data::new(AppState {
         users: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
+        orderbook_tx: tx,
     });
 
     HttpServer::new(move || {
