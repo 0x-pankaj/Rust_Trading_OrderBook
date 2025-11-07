@@ -37,22 +37,27 @@ impl Orderbook {
             OrderType::MarketOrder => {
                 trades = self.match_market_order(&mut order);
 
-                if order.remaining_quantity > 0.0 {
-                    return OrderResponse::Error {
-                        message: "Insufficient liquidity for market order".to_string(),
-                    };
-                }
-
                 if trades.is_empty() {
                     return OrderResponse::Error {
                         message: "No matching orders available".to_string(),
                     };
                 }
 
-                OrderResponse::Filled {
-                    order_id: order.id.clone(),
-                    filled_quantity: original_quantity,
-                    trades,
+                let filled_quantity = original_quantity - order.remaining_quantity;
+
+                if order.remaining_quantity > 0.0 {
+                    OrderResponse::PartiallyFilled {
+                        order_id: order.id.clone(),
+                        filled_quantity,
+                        remaining_quantity: order.remaining_quantity,
+                        trades,
+                    }
+                } else {
+                    OrderResponse::Filled {
+                        order_id: order.id.clone(),
+                        filled_quantity: original_quantity,
+                        trades,
+                    }
                 }
             }
             OrderType::LimitOrder => {

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use serde::Serialize;
+
 #[derive(Clone)]
 pub struct User {
     pub id: String,
@@ -45,7 +47,7 @@ pub struct Order {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Trade {
     pub id: String,
     pub buy_order_id: String,
@@ -55,11 +57,13 @@ pub struct Trade {
     pub timestamp: u64,
 }
 
+#[derive(Serialize)]
 pub struct OrderbookSnapshot {
     pub bids: Vec<(f64, f64)>,
     pub asks: Vec<(f64, f64)>,
 }
 
+#[derive(Serialize)]
 pub enum OrderResponse {
     Placed {
         order_id: String,
