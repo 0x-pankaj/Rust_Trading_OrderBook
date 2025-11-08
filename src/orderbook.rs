@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 use uuid::Uuid;
 
@@ -9,7 +9,6 @@ use crate::types::{
 pub struct Orderbook {
     bids: BTreeMap<u64, VecDeque<Order>>,
     asks: BTreeMap<u64, VecDeque<Order>>,
-    orders: HashMap<String, Order>,
 }
 
 impl Orderbook {
@@ -17,7 +16,6 @@ impl Orderbook {
         Self {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
-            orders: HashMap::new(),
         }
     }
 
@@ -71,7 +69,6 @@ impl Orderbook {
 
                 if order.remaining_quantity > 0.0 {
                     self.add_to_book(order.clone());
-                    // self.orders.insert(order.id.clone(), order.clone());
 
                     if trades.is_empty() {
                         OrderResponse::Placed {
@@ -145,10 +142,6 @@ impl Orderbook {
 
                     if matching_order.remaining_quantity > 0.0 {
                         order_at_price.push_front(matching_order);
-                        // self.orders
-                        //     .insert(matching_order.id.clone(), matching_order);
-                    } else {
-                        self.orders.remove(&matching_order.id);
                     }
 
                     if order.remaining_quantity <= 0.0 {

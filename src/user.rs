@@ -96,7 +96,7 @@ struct AuthRequest {
 async fn signup(data: web::Data<AppState>, body: web::Json<AuthRequest>) -> impl Responder {
     let username = body.username.to_string();
     let password = body.password.to_string();
-
+    println!("called");
     if username.is_empty() || password.is_empty() {
         return HttpResponse::BadRequest().json(AuthResponse {
             success: false,
@@ -181,8 +181,8 @@ async fn signin(data: web::Data<AppState>, body: web::Json<AuthRequest>) -> impl
     }
 }
 
-#[get("/whoami")]
-async fn whoami(data: web::Data<AppState>, req: HttpRequest) -> impl Responder {
+#[get("/me")]
+async fn me(data: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     let token_opt = req
         .headers()
         .get("Authorization")
