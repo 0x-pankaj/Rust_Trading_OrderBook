@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-
 use serde::Serialize;
+
+use crate::{orderbook::UserBalanceInfo, user::OnRampResponse};
 
 #[derive(Clone)]
 pub struct User {
     pub id: String,
     pub username: String,
     pub password_hash: String,
-    pub balance: f64,
-    pub assets: HashMap<String, f64>,
+    // pub balance: f64,
+    // pub assets: HashMap<String, f64>,
 }
 
 impl User {
@@ -17,25 +17,25 @@ impl User {
             id,
             username,
             password_hash: password,
-            balance: 0.0,
-            assets: HashMap::new(),
+            // balance: 0.0,
+            // assets: HashMap::new(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum OrderSide {
     Buy,
     Sell,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum OrderType {
     LimitOrder,
     MarketOrder,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Order {
     pub id: String,
     pub user_id: String,
@@ -91,6 +91,15 @@ pub enum OrderbookCommand {
     AddOrder {
         order: Order,
         response: tokio::sync::oneshot::Sender<OrderResponse>,
+    },
+    GetUserBalance {
+        user_id: String,
+        response: tokio::sync::oneshot::Sender<UserBalanceInfo>,
+    },
+    OnRamp {
+        user_id: String,
+        amount: f64,
+        response: tokio::sync::oneshot::Sender<OnRampResponse>,
     },
     GetSnapshot {
         response: tokio::sync::oneshot::Sender<OrderbookSnapshot>,

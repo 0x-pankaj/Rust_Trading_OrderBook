@@ -4,10 +4,11 @@ use actix_web::{
 };
 use bcrypt::{DEFAULT_COST, hash, verify};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::types::User;
+use crate::{AppState, types::OrderbookCommand};
 
 #[derive(Deserialize)]
 pub struct OnRampRequest {
@@ -48,34 +49,60 @@ pub async fn onramp(
 
     match sessions.get(&token) {
         Some(username) => {
-            let mut users = data.users.lock().unwrap();
-            if let Some(user) = users.get_mut(username) {
-                if body.amount <= 0.0 {
-                    return HttpResponse::BadRequest().json(OnRampResponse {
-                        success: false,
-                        message: "amount must be greate than zero ".to_string(),
-                        new_balance: 0.0,
-                    });
+            let user_id = {
+                let users = data.users.lock().unwrap();
+                match users.get(username) {
+                    Some(user) => user.id.clone(),
+                    None => {
+                        return HttpResponse::Unauthorized().json(OnRampResponse {
+                            message: "usernot found".to_string(),
+                            new_balance: 0.0,
+                            success: false,
+                        });
+                    }
                 }
-
-                user.balance += body.amount;
-                HttpResponse::Ok().json(OnRampResponse {
-                    success: true,
-                    message: "successfully added balance ".to_string(),
-                    new_balance: user.balance,
-                })
-            } else {
-                HttpResponse::Unauthorized().json(OnRampResponse {
-                    success: false,
-                    message: "unauthorized".to_string(),
+            };
+            if body.amount < 0.0 {
+                return HttpResponse::BadRequest().json(OnRampResponse {
+                    message: "balance must be greater than zero".to_string(),
                     new_balance: 0.0,
-                })
+                    success: false,
+                });
+            }
+
+            // sending to orderbook
+            let (tx, rx) = oneshot::channel();
+            let cmd = OrderbookCommand::OnRamp {
+                user_id,
+                amount: body.amount,
+                response: tx,
+            };
+
+            if data.orderbook_tx.send(cmd).await.is_err() {
+                return HttpResponse::InternalServerError().json(OnRampResponse {
+                    message: "failed to send to orderbook".to_string(),
+                    new_balance: 0.0,
+                    success: false,
+                });
+            }
+
+            match rx.await {
+                Ok(res) => HttpResponse::Ok().json(OnRampResponse {
+                    message: res.message,
+                    new_balance: res.new_balance,
+                    success: res.success,
+                }),
+                Err(_) => HttpResponse::InternalServerError().json(OnRampResponse {
+                    message: "Failed to receive response".to_string(),
+                    new_balance: 0.0,
+                    success: false,
+                }),
             }
         }
         None => HttpResponse::Unauthorized().json(OnRampResponse {
-            success: false,
-            message: "unautorized ".to_string(),
+            message: "unauthorized".to_string(),
             new_balance: 0.0,
+            success: false,
         }),
     }
 }
@@ -199,13 +226,57 @@ async fn me(data: web::Data<AppState>, req: HttpRequest) -> impl Responder {
     }
 
     let token = token_opt.unwrap();
-
-    println!("token: {}", token);
-
     let sessions = data.sessions.lock().unwrap();
 
     match sessions.get(&token) {
-        Some(user) => HttpResponse::Ok().json(serde_json::json!({"username": user})),
-        None => return HttpResponse::Unauthorized().body("invalid token"),
+        Some(username) => {
+            let user_id = {
+                let users = data.users.lock().unwrap();
+                match users.get(username) {
+                    Some(u) => u.id.clone(),
+                    None => {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "success": false,
+                            "message": "user not found".to_string()
+                        }));
+                    }
+                }
+            };
+
+            let (tx, rx) = oneshot::channel();
+            let cmd = OrderbookCommand::GetUserBalance {
+                user_id,
+                response: tx,
+            };
+
+            if data.orderbook_tx.send(cmd).await.is_err() {
+                return HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "message": "failed to get user balance".to_string()
+                }));
+            }
+
+            match rx.await {
+                Ok(balance_info) => HttpResponse::Ok().json(serde_json::json!({
+                    "username": username.to_string(),
+                    "balance": balance_info.collateral_balance,
+                    "locked_balance": balance_info.locked_balance,
+                    "assets": balance_info.assets,
+                    "pending_orders": balance_info.pending_order
+                })),
+                Err(_) => {
+                    return HttpResponse::InternalServerError().json(serde_json::json!({
+                        "message": "failed to receive message".to_string(),
+                        "success": false
+                    }));
+                }
+            }
+        }
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "invalid token".to_string()
+            }));
+        }
     }
 }

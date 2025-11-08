@@ -1,30 +1,115 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use uuid::Uuid;
 
-use crate::types::{
-    Order, OrderResponse, OrderSide, OrderType, OrderbookCommand, OrderbookSnapshot, Trade,
+use crate::{
+    types::{
+        Order, OrderResponse, OrderSide, OrderType, OrderbookCommand, OrderbookSnapshot, Trade,
+    },
+    user::OnRampResponse,
 };
+
+#[derive(Debug)]
+pub struct UserBalanceInfo {
+    pub collateral_balance: f64,
+    pub locked_balance: f64,          // balance for pending order
+    pub pending_order: Vec<Order>,    // pending order while doing limit order
+    pub assets: HashMap<String, f64>, //need to check while doing sell not allow sell more than what user have
+}
+
+struct UserStore {
+    collateral_balance: f64,
+    locked_balance: f64,
+    pending_orders: VecDeque<Order>,
+    assets: HashMap<String, f64>, // symbol -> quantity
+}
+
+impl UserStore {
+    fn new() -> Self {
+        Self {
+            collateral_balance: 0.0,
+            locked_balance: 0.0,
+            pending_orders: VecDeque::new(),
+            assets: HashMap::new(),
+        }
+    }
+}
+
+impl UserBalanceInfo {
+    pub fn new(&self) -> Self {
+        Self {
+            collateral_balance: 0.0,
+            locked_balance: 0.0,
+            pending_order: Vec::new(),
+            assets: HashMap::new(),
+        }
+    }
+}
 
 pub struct Orderbook {
     bids: BTreeMap<u64, VecDeque<Order>>,
     asks: BTreeMap<u64, VecDeque<Order>>,
+    user_store: HashMap<String, UserStore>, //storing (collateral_balance, locked balance, unmatched order, bought orders )
 }
+
+const ASSET_SYMBOL: &str = "BTC";
 
 impl Orderbook {
     pub fn new() -> Self {
         Self {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
+            user_store: HashMap::new(),
         }
     }
 
     fn price_to_key(price: f64) -> u64 {
         (price * 100000.0) as u64
     }
-
     fn key_to_price(cent: u64) -> f64 {
         cent as f64 / 100000.0
+    }
+
+    //add collateral balance to the user
+    pub fn on_ramp(&mut self, user_id: String, amount: f64) -> OnRampResponse {
+        if amount < 0.0 {
+            return OnRampResponse {
+                success: false,
+                message: "balance must be greater than zero".to_string(),
+                new_balance: 0.0,
+            };
+        }
+
+        let user_store = self
+            .user_store
+            .entry(user_id)
+            .or_insert_with(UserStore::new);
+
+        user_store.collateral_balance += amount;
+
+        OnRampResponse {
+            success: true,
+            message: "Balance added Successfully".to_string(),
+            new_balance: user_store.collateral_balance,
+        }
+    }
+
+    pub fn get_user_balance(&self, user_id: String) -> UserBalanceInfo {
+        if let Some(user_store) = self.user_store.get(&user_id) {
+            UserBalanceInfo {
+                collateral_balance: user_store.collateral_balance,
+                locked_balance: user_store.locked_balance,
+                pending_order: user_store.pending_orders.iter().cloned().collect(),
+                assets: user_store.assets.clone(),
+            }
+        } else {
+            UserBalanceInfo {
+                collateral_balance: 0.0,
+                locked_balance: 0.0,
+                pending_order: Vec::new(),
+                assets: HashMap::new(),
+            }
+        }
     }
 
     pub fn add_order(&mut self, mut order: Order) -> OrderResponse {
@@ -275,6 +360,19 @@ impl Orderbook {
                 OrderbookCommand::GetSnapshot { response } => {
                     let snapshot = orderbook.get_snapshot();
                     let _ = response.send(snapshot);
+                }
+                OrderbookCommand::GetUserBalance { user_id, response } => {
+                    let user_balance = orderbook.get_user_balance(user_id);
+                    let _ = response.send(user_balance);
+                }
+                OrderbookCommand::OnRamp {
+                    user_id,
+                    amount,
+                    response,
+                } => {
+                    let ramp = orderbook.on_ramp(user_id, amount);
+
+                    let _ = response.send(ramp);
                 }
             }
         }
