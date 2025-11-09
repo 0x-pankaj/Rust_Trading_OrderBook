@@ -24,6 +24,7 @@ struct AppState {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::channel::<OrderbookCommand>(100);
+
     tokio::spawn(async move {
         orderbook::Orderbook::run_orderbook_engine(rx).await;
     });

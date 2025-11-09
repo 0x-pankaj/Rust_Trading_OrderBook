@@ -17,6 +17,17 @@ pub struct UserBalanceInfo {
     pub assets: HashMap<String, f64>, //need to check while doing sell not allow sell more than what user have
 }
 
+impl UserBalanceInfo {
+    pub fn new(&self) -> Self {
+        Self {
+            collateral_balance: 0.0,
+            locked_balance: 0.0,
+            pending_order: Vec::new(),
+            assets: HashMap::new(),
+        }
+    }
+}
+
 struct UserStore {
     collateral_balance: f64,
     locked_balance: f64,
@@ -30,17 +41,6 @@ impl UserStore {
             collateral_balance: 0.0,
             locked_balance: 0.0,
             pending_orders: VecDeque::new(),
-            assets: HashMap::new(),
-        }
-    }
-}
-
-impl UserBalanceInfo {
-    pub fn new(&self) -> Self {
-        Self {
-            collateral_balance: 0.0,
-            locked_balance: 0.0,
-            pending_order: Vec::new(),
             assets: HashMap::new(),
         }
     }
@@ -113,11 +113,32 @@ impl Orderbook {
     }
 
     pub fn add_order(&mut self, mut order: Order) -> OrderResponse {
+        let user_store = self
+            .user_store
+            .entry(order.user_id.clone())
+            .or_insert_with(UserStore::new);
+
         let mut trades = Vec::new();
         let original_quantity = order.quantity;
 
         match order.order_type {
             OrderType::MarketOrder => {
+                match order.side {
+                    OrderSide::Buy => {}
+                    OrderSide::Sell => {
+                        let available = user_store.assets.get(ASSET_SYMBOL).unwrap_or(&0.0);
+                        if *available < original_quantity {
+                            return OrderResponse::Error {
+                                message: format!(
+                                    "Insufficient available share Required :{}, available: {}",
+                                    order.quantity, available
+                                ),
+                            };
+                        }
+                    }
+                }
+
+                //matching order counter party
                 trades = self.match_market_order(&mut order);
 
                 if trades.is_empty() {
@@ -149,11 +170,42 @@ impl Orderbook {
                         message: "limit order must have price".to_string(),
                     };
                 }
+                let price = order.price.unwrap();
+
+                //locking balance/assets for limit order
+                match order.side {
+                    OrderSide::Buy => {
+                        let required = price * original_quantity;
+                        if user_store.collateral_balance < required {
+                            return OrderResponse::Error {
+                                message: "balance is not sufficient".to_string(),
+                            };
+                        }
+                        user_store.collateral_balance -= required;
+                        user_store.locked_balance += required;
+                    }
+                    OrderSide::Sell => {
+                        let availabe = user_store.assets.get(ASSET_SYMBOL).unwrap_or(&0.0);
+
+                        if *availabe < order.quantity {
+                            return OrderResponse::Error {
+                                message: "Insufficient assets ".to_string(),
+                            };
+                        }
+                        let current = user_store.assets.get(ASSET_SYMBOL).unwrap_or(&0.0);
+                        user_store
+                            .assets
+                            .insert(ASSET_SYMBOL.to_string(), current - order.quantity);
+                    }
+                }
 
                 trades = self.match_limit_order(&mut order);
 
                 if order.remaining_quantity > 0.0 {
+                    //adding to the book and track as a pending order
                     self.add_to_book(order.clone());
+                    let user_store = self.user_store.get_mut(&order.user_id).unwrap();
+                    user_store.pending_orders.push_back(order.clone());
 
                     if trades.is_empty() {
                         OrderResponse::Placed {
@@ -201,6 +253,18 @@ impl Orderbook {
                         .remaining_quantity
                         .min(matching_order.remaining_quantity);
                     let trade_price = matching_order.price.unwrap();
+                    let trade_value = trade_price * trade_quantity;
+
+                    //checking price available or not before each trade
+                    if matches!(order.side, OrderSide::Buy) {
+                        let user_store = self.user_store.get_mut(&order.user_id).unwrap();
+                        if user_store.collateral_balance < trade_value {
+                            order_at_price.push_front(matching_order);
+                            break;
+                        }
+
+                        user_store.collateral_balance -= trade_value;
+                    }
 
                     let trade = Trade {
                         id: Uuid::new_v4().to_string(),
@@ -225,13 +289,107 @@ impl Orderbook {
                     order.remaining_quantity -= trade_quantity;
                     matching_order.remaining_quantity -= trade_quantity;
 
-                    if matching_order.remaining_quantity > 0.0 {
-                        order_at_price.push_front(matching_order);
+                    //settling trade immediately
+
+                    match order.side {
+                        OrderSide::Buy => {
+                            // adding asset to buyer
+                            let user_store = self.user_store.get_mut(&order.user_id).unwrap();
+
+                            let current = user_store.assets.get(ASSET_SYMBOL).unwrap_or(&0.0);
+                            user_store
+                                .assets
+                                .insert(ASSET_SYMBOL.to_string(), current + trade_quantity);
+
+                            //adding balance to the matching user
+                            let matching_user_store =
+                                self.user_store.get_mut(&matching_order.user_id).unwrap();
+                            matching_user_store.collateral_balance += trade_value;
+
+                            if matching_order.remaining_quantity > 0.0 {
+                                //update pending order of the matching user
+                                if let Some(pending) = matching_user_store
+                                    .pending_orders
+                                    .iter_mut()
+                                    .find(|o| o.id == matching_order.id)
+                                {
+                                    pending.remaining_quantity = matching_order.remaining_quantity;
+                                }
+                                order_at_price.push_front(matching_order);
+                            } else {
+                                //removing from pending order
+
+                                matching_user_store
+                                    .pending_orders
+                                    .retain(|o| o.id != matching_order.id);
+                            }
+                        }
+                        OrderSide::Sell => {
+                            //adding balance to the seller (order user)
+                            let user_store = self.user_store.get_mut(&order.user_id).unwrap();
+                            user_store.collateral_balance += trade_value;
+
+                            //deduction locked balance from matching user (Buyer side) and adding assets
+                            let matching_user_store =
+                                self.user_store.get_mut(&matching_order.user_id).unwrap();
+
+                            matching_user_store.locked_balance -= trade_value;
+
+                            let current = matching_user_store.assets.get(ASSET_SYMBOL).unwrap();
+
+                            matching_user_store
+                                .assets
+                                .insert(ASSET_SYMBOL.to_string(), trade_quantity + current);
+
+                            if matching_order.remaining_quantity > 0.0 {
+                                // updating pending order
+                                if let Some(pending) = matching_user_store
+                                    .pending_orders
+                                    .iter_mut()
+                                    .find(|o| o.id == matching_order.id)
+                                {
+                                    pending.remaining_quantity = matching_order.remaining_quantity;
+                                }
+                                order_at_price.push_front(matching_order);
+                            }
+                        }
                     }
 
                     if order.remaining_quantity <= 0.0 {
                         break;
                     }
+
+                    // if matching_order.remaining_quantity > 0.0 {
+                    //     order_at_price.push_front(matching_order.clone());
+
+                    //     //market order
+                    //     //updating pending order for the matching user
+                    //     // we are already accessing user and matching user here
+                    //     // case Buy then increase the asset of user and decrease the pending order of matching user and also increase the collateral balance of matching user
+                    //     // case Sell then increase the user collateral balance of user and increase the asset of matching user
+                    //     if let Some(user_store) = self.user_store.get_mut(&matching_order.user_id) {
+                    //         if let Some(pending) = user_store
+                    //             .pending_orders
+                    //             .iter_mut()
+                    //             .find(|o| o.id == matching_order.id)
+                    //         {
+                    //             pending.remaining_quantity = matching_order.remaining_quantity;
+                    //         }
+                    //     } else {
+                    //         //removing from pending order
+                    //         if let Some(user_store) =
+                    //             self.user_store.get_mut(&matching_order.user_id)
+                    //         {
+                    //             user_store
+                    //                 .pending_orders
+                    //                 .retain(|o| o.id != matching_order.id);
+                    //         }
+                    //     }
+
+                    //     if order.remaining_quantity <= 0.0 {
+                    //         break;
+                    //     }
+                    // }
                 }
 
                 if order_at_price.is_empty() {
@@ -278,6 +436,7 @@ impl Orderbook {
                         .remaining_quantity
                         .min(matching_order.remaining_quantity);
                     let trade_price = matching_order.price.unwrap();
+                    let trade_value = trade_price * trading_quantity;
 
                     let trade = Trade {
                         id: Uuid::new_v4().to_string(),
@@ -302,13 +461,92 @@ impl Orderbook {
                     order.remaining_quantity -= trading_quantity;
                     matching_order.remaining_quantity -= trading_quantity;
 
-                    if (matching_order.remaining_quantity > 0.0) {
-                        order_at_price.push_front(matching_order);
+                    //settle trade immediately
+
+                    match order.side {
+                        OrderSide::Buy => {
+                            // deduct balance from user lockedbalance and assets to the user
+
+                            let user_store = self.user_store.get_mut(&order.user_id).unwrap();
+                            user_store.locked_balance -= trade_value;
+                            let current = user_store.assets.get(ASSET_SYMBOL).unwrap();
+                            user_store
+                                .assets
+                                .insert(ASSET_SYMBOL.to_string(), current + trading_quantity);
+
+                            //add balance to the seller  and update pending
+
+                            let matching_user_order =
+                                self.user_store.get_mut(&matching_order.user_id).unwrap();
+                            matching_user_order.collateral_balance += trade_value;
+
+                            if matching_order.remaining_quantity > 0.0 {
+                                //updating pending order
+                                if let Some(pending) = matching_user_order
+                                    .pending_orders
+                                    .iter_mut()
+                                    .find(|o| o.id == matching_order.id)
+                                {
+                                    pending.remaining_quantity = matching_order.remaining_quantity;
+                                }
+                                order_at_price.push_front(matching_order);
+                            } else {
+                                //removing from pending order
+                                matching_user_order
+                                    .pending_orders
+                                    .retain(|o| o.id != matching_order.id);
+                            }
+                        }
+                        OrderSide::Sell => {
+                            //adding balance to the seller and free pending order of the seller  (order user)
+
+                            let user_store = self.user_store.get_mut(&order.user_id).unwrap();
+                            user_store.collateral_balance += trade_value;
+
+                            //deduct balance and add assets (matching user)
+                            let matching_user_store =
+                                self.user_store.get_mut(&matching_order.user_id).unwrap();
+                            matching_user_store.locked_balance -= trade_value;
+
+                            let current =
+                                matching_user_store.assets.get(ASSET_SYMBOL).unwrap_or(&0.0);
+
+                            matching_user_store
+                                .assets
+                                .insert(ASSET_SYMBOL.to_string(), trading_quantity + current);
+
+                            if matching_order.remaining_quantity > 0.0 {
+                                // update pending order
+                                if let Some(pending) = matching_user_store
+                                    .pending_orders
+                                    .iter_mut()
+                                    .find(|o| o.id == matching_order.id)
+                                {
+                                    pending.remaining_quantity = matching_order.remaining_quantity;
+                                }
+                                order_at_price.push_front(matching_order);
+                            } else {
+                                //remove from pending order
+                                matching_user_store
+                                    .pending_orders
+                                    .retain(|o| o.id != matching_order.id);
+                            }
+                        }
                     }
 
                     if order.remaining_quantity <= 0.0 {
                         break;
                     }
+
+                    // if (matching_order.remaining_quantity > 0.0) {
+                    // order_at_price.push_front(matching_order);
+
+                    // case BUY access user deduct locked balance and add assets
+                    // access matching deduct pending order and increase collateral balance
+                    //
+                    //case Sell access matching user increase their asset and deduct their locked balance and increase their assets
+                    // access user and increase collateral balance and decrease pending as pending goes zero
+                    // }
                 }
                 if order_at_price.is_empty() {
                     book.remove(&price_key);
